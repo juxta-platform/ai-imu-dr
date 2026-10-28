@@ -455,10 +455,11 @@ def test_filter(args, dataset):
 
 
 class KITTIArgs():
+        _repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
         path_data_base = "/media/mines/46230797-4d43-4860-9b76-ce35e699ea47/KITTI/raw"
-        path_data_save = "../data"
-        path_results = "../results"
-        path_temp = "../temp"
+        path_data_save = os.path.join(_repo_root, "data")
+        path_results = os.path.join(_repo_root, "results")
+        path_temp = os.path.join(_repo_root, "temp")
 
         epochs = 400
         seq_dim = 6000
