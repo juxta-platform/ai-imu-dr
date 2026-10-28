@@ -200,7 +200,151 @@ def results_filter(args, dataset):
             fig_name = figs_name[l]
             fig.savefig(os.path.join(folder_path, fig_name + ".png"))
 
-        plt.show(block=True)
+        # Non-blocking so headless / Agg runs finish; interactive backends still draw.
+        plt.show(block=False)
 
+
+def plot_before_divergence(args, dataset, speed_factor=1.5, horizons=(60, 300)):
+    """Plot xy trajectory and error up to the first time the estimated speed exceeds
+    speed_factor x the max ground-truth speed (plus fixed early horizons)."""
+    for i in range(0, len(dataset.datasets)):
+        plt.close('all')
+        dataset_name = dataset.dataset_name(i)
+        if not os.path.exists(os.path.join(dataset.path_results, dataset_name + "_filter.p")):
+            continue
+        Rot, v, p, b_omega, b_acc, Rot_c_i, t_c_i, measurements_covs = dataset.get_estimates(
+            dataset_name)
+        t, ang_gt, p_gt, v_gt, u = dataset.get_data(dataset_name)
+        t = (t - t[0]).numpy()
+        p_gt = (p_gt - p_gt[0]).numpy()
+        v_gt = v_gt.numpy()
+
+        speed_gt = np.linalg.norm(v_gt, axis=1)
+        diverged = np.where(np.linalg.norm(v, axis=1) > speed_factor * speed_gt.max())[0]
+        n_div = int(diverged[0]) if len(diverged) else len(t)
+        err_xy = np.linalg.norm(p_gt[:, :2] - p[:, :2], axis=1)
+        dist_gt = np.concatenate([[0], np.cumsum(np.linalg.norm(np.diff(p_gt[:, :2], axis=0), axis=1))])
+
+        windows = [(int(np.searchsorted(t, h)), 'first {:.0f} s'.format(h)) for h in horizons if h < t[n_div - 1]]
+        windows.append((n_div, 'until divergence (t = {:.0f} s)'.format(t[n_div - 1])))
+        fig, axs = plt.subplots(2, len(windows), figsize=(20, 10), squeeze=False)
+        for j, (n, label) in enumerate(windows):
+            axs[0, j].plot(p_gt[:n, 0], p_gt[:n, 1])
+            axs[0, j].plot(p[:n, 0], p[:n, 1])
+            axs[0, j].axis('equal')
+            axs[0, j].set(xlabel=r'$p_n^x$ (m)', ylabel=r'$p_n^y$ (m)', title='Position on $xy$, ' + label)
+            axs[0, j].legend(['ground-truth trajectory', 'proposed'])
+            axs[1, j].plot(t[:n], err_xy[:n])
+            axs[1, j].set(xlabel='time (s)', ylabel=r'$|| \mathbf{p}^{xy}_{n}-\hat{\mathbf{p}}^{xy}_{n} ||$ (m)',
+                          title='xy error (GT distance {:.0f} m)'.format(dist_gt[n - 1]))
+            for ax in axs[:, j]:
+                ax.grid()
+        fig.tight_layout()
+        folder_path = os.path.join(args.path_results, dataset_name)
+        create_folder(folder_path)
+        fig.savefig(os.path.join(folder_path, "position_xy_before_divergence.png"))
+
+
+def _stationary_segments(t, stationary):
+    """Return list of (t_start, t_end) for contiguous True runs in stationary."""
+    if len(stationary) == 0 or not np.any(stationary):
+        return []
+    padded = np.concatenate([[False], stationary, [False]])
+    edges = np.diff(padded.astype(np.int8))
+    starts = np.where(edges == 1)[0]
+    ends = np.where(edges == -1)[0] - 1
+    return [(float(t[s]), float(t[e])) for s, e in zip(starts, ends)]
+
+
+def _shade_stationary(ax, segments, label_once=True):
+    labeled = False
+    for t0, t1 in segments:
+        ax.axvspan(t0, t1, color='0.85', zorder=0,
+                   label='stationary (GPS)' if label_once and not labeled else None)
+        labeled = True
+
+
+def plot_stationary_periods(args, dataset, speed_thresh=0.5, speed_factor=1.5):
+    """GPS speed (GT), raw IMU, and KF speed/trajectory with GPS-stationary periods shaded."""
+    for i in range(0, len(dataset.datasets)):
+        plt.close('all')
+        dataset_name = dataset.dataset_name(i)
+        if not os.path.exists(os.path.join(dataset.path_results, dataset_name + "_filter.p")):
+            continue
+        Rot, v, p, b_omega, b_acc, Rot_c_i, t_c_i, measurements_covs = dataset.get_estimates(
+            dataset_name)
+        t, ang_gt, p_gt, v_gt, u = dataset.get_data(dataset_name)
+        t = (t - t[0]).numpy()
+        p_gt = (p_gt - p_gt[0]).numpy()
+        v_gt = v_gt.numpy()
+        u = u.numpy()
+
+        speed_gt = np.linalg.norm(v_gt, axis=1)
+        speed_est = np.linalg.norm(v, axis=1)
+        stationary = speed_gt < speed_thresh
+        segments = _stationary_segments(t, stationary)
+        diverged = np.where(speed_est > speed_factor * max(speed_gt.max(), 1e-6))[0]
+        n_div = int(diverged[0]) if len(diverged) else len(t)
+
+        fig, axs = plt.subplots(4, 1, sharex=True, figsize=(20, 14))
+        _shade_stationary(axs[0], segments)
+        axs[0].plot(t, speed_gt, label='GPS speed (GT)')
+        axs[0].plot(t, speed_est, label='KF speed')
+        axs[0].axhline(speed_thresh, color='k', linestyle='--', linewidth=0.8,
+                        label='stationary thresh ({:.1f} m/s)'.format(speed_thresh))
+        if n_div < len(t):
+            axs[0].axvline(t[n_div], color='r', linestyle=':', linewidth=1.0, label='KF divergence')
+        axs[0].set(ylabel='speed (m/s)', title='{}: speed and stationary periods'.format(dataset_name))
+        axs[0].legend(loc='upper right')
+
+        _shade_stationary(axs[1], segments, label_once=False)
+        axs[1].plot(t, u[:, 0], label=r'$\omega_x$')
+        axs[1].plot(t, u[:, 1], label=r'$\omega_y$')
+        axs[1].plot(t, u[:, 2], label=r'$\omega_z$')
+        axs[1].set(ylabel='rad/s', title='Raw gyro (car frame)')
+        axs[1].legend(loc='upper right')
+
+        _shade_stationary(axs[2], segments, label_once=False)
+        axs[2].plot(t, u[:, 3], label=r'$a_x$')
+        axs[2].plot(t, u[:, 4], label=r'$a_y$')
+        axs[2].plot(t, u[:, 5], label=r'$a_z$')
+        axs[2].set(ylabel=r'm/s$^2$', title='Raw accelerometer (car frame)')
+        axs[2].legend(loc='upper right')
+
+        _shade_stationary(axs[3], segments, label_once=False)
+        axs[3].plot(t, v_gt[:, 0], label=r'GPS $v_e$')
+        axs[3].plot(t, v_gt[:, 1], label=r'GPS $v_n$')
+        axs[3].plot(t, v[:, 0], label=r'KF $\hat{v}_e$')
+        axs[3].plot(t, v[:, 1], label=r'KF $\hat{v}_n$')
+        axs[3].set(xlabel='time (s)', ylabel='m/s', title='Horizontal velocity components')
+        axs[3].legend(loc='upper right')
+        for ax in axs:
+            ax.grid()
+        fig.tight_layout()
+
+        # Trajectory with stationary samples highlighted (clipped before divergence)
+        fig2, ax2 = plt.subplots(figsize=(12, 10))
+        n = n_div
+        ax2.plot(p_gt[:n, 0], p_gt[:n, 1], label='GPS / GT trajectory')
+        ax2.plot(p[:n, 0], p[:n, 1], label='KF trajectory')
+        st = stationary[:n]
+        if np.any(st):
+            ax2.scatter(p_gt[:n][st, 0], p_gt[:n][st, 1], s=4, c='0.5',
+                        label='GT while GPS-stationary', zorder=3)
+            ax2.scatter(p[:n][st, 0], p[:n][st, 1], s=4, c='C3',
+                        label='KF while GPS-stationary', zorder=3)
+        ax2.axis('equal')
+        ax2.set(xlabel=r'$p^x$ (m)', ylabel=r'$p^y$ (m)',
+                title='Trajectory until divergence (t = {:.0f} s); stationary marked'.format(t[n - 1]))
+        ax2.legend(loc='best')
+        ax2.grid()
+        fig2.tight_layout()
+
+        folder_path = os.path.join(args.path_results, dataset_name)
+        create_folder(folder_path)
+        fig.savefig(os.path.join(folder_path, "stationary_periods.png"))
+        fig2.savefig(os.path.join(folder_path, "stationary_trajectory.png"))
+        print('  stationary: {:.1f}% of samples, {} segments'.format(
+            100.0 * stationary.mean(), len(segments)))
 
 
