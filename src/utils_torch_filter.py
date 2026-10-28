@@ -44,7 +44,20 @@ class MesNet(torch.nn.Module):
             self.beta_measurement = 3*torch.ones(2).double()
             self.tanh = torch.nn.Tanh()
 
+            # Match pretrained iekfnets.p (5 conv blocks); upstream MesNet was truncated.
             self.cov_net = torch.nn.Sequential(torch.nn.Conv1d(6, 32, 5),
+                       torch.nn.ReplicationPad1d(4),
+                       torch.nn.ReLU(),
+                       torch.nn.Dropout(p=0.5),
+                       torch.nn.Conv1d(32, 64, 5, dilation=3),
+                       torch.nn.ReplicationPad1d(4),
+                       torch.nn.ReLU(),
+                       torch.nn.Dropout(p=0.5),
+                       torch.nn.Conv1d(64, 128, 7, dilation=5),
+                       torch.nn.ReplicationPad1d(19),
+                       torch.nn.ReLU(),
+                       torch.nn.Dropout(p=0.5),
+                       torch.nn.Conv1d(128, 32, 5, dilation=3),
                        torch.nn.ReplicationPad1d(4),
                        torch.nn.ReLU(),
                        torch.nn.Dropout(p=0.5),
