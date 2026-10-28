@@ -198,6 +198,9 @@ def csv_to_mondict(csv_path, name):
     tail = np.where(handling & (t > t[-1] - HANDLING_WINDOW_S))[0]
     i_end = int(tail[0]) if len(tail) else len(t)
     i0 = max(i0, int(head[-1]) + 1 if len(head) else 0)
+    if i_end - i0 < 2:
+        raise RuntimeError(
+            'Trimming leaves fewer than two usable samples in {}'.format(csv_path))
 
     # Drop samples before first GPS (origin undefined / parked noise OK but GT bad)
     if i0 > 0 or i_end < len(t):

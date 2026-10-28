@@ -215,18 +215,19 @@ def plot_before_divergence(args, dataset, speed_factor=1.5, horizons=(60, 300)):
         Rot, v, p, b_omega, b_acc, Rot_c_i, t_c_i, measurements_covs = dataset.get_estimates(
             dataset_name)
         t, ang_gt, p_gt, v_gt, u = dataset.get_data(dataset_name)
-        t = (t - t[0]).numpy()
-        p_gt = (p_gt - p_gt[0]).numpy()
-        v_gt = v_gt.numpy()
+        t = (t - t[0]).cpu().numpy()
+        p_gt = (p_gt - p_gt[0]).cpu().numpy()
+        v_gt = v_gt.cpu().numpy()
 
         speed_gt = np.linalg.norm(v_gt, axis=1)
         diverged = np.where(np.linalg.norm(v, axis=1) > speed_factor * speed_gt.max())[0]
         n_div = int(diverged[0]) if len(diverged) else len(t)
+        n_last = max(n_div - 1, 0)
         err_xy = np.linalg.norm(p_gt[:, :2] - p[:, :2], axis=1)
         dist_gt = np.concatenate([[0], np.cumsum(np.linalg.norm(np.diff(p_gt[:, :2], axis=0), axis=1))])
 
-        windows = [(int(np.searchsorted(t, h)), 'first {:.0f} s'.format(h)) for h in horizons if h < t[n_div - 1]]
-        windows.append((n_div, 'until divergence (t = {:.0f} s)'.format(t[n_div - 1])))
+        windows = [(int(np.searchsorted(t, h)), 'first {:.0f} s'.format(h)) for h in horizons if h < t[n_last]]
+        windows.append((n_div, 'until divergence (t = {:.0f} s)'.format(t[n_last])))
         fig, axs = plt.subplots(2, len(windows), figsize=(20, 10), squeeze=False)
         for j, (n, label) in enumerate(windows):
             axs[0, j].plot(p_gt[:n, 0], p_gt[:n, 1])
@@ -236,7 +237,7 @@ def plot_before_divergence(args, dataset, speed_factor=1.5, horizons=(60, 300)):
             axs[0, j].legend(['ground-truth trajectory', 'proposed'])
             axs[1, j].plot(t[:n], err_xy[:n])
             axs[1, j].set(xlabel='time (s)', ylabel=r'$|| \mathbf{p}^{xy}_{n}-\hat{\mathbf{p}}^{xy}_{n} ||$ (m)',
-                          title='xy error (GT distance {:.0f} m)'.format(dist_gt[n - 1]))
+                          title='xy error (GT distance {:.0f} m)'.format(dist_gt[max(n - 1, 0)]))
             for ax in axs[:, j]:
                 ax.grid()
         fig.tight_layout()
@@ -274,10 +275,10 @@ def plot_stationary_periods(args, dataset, speed_thresh=0.5, speed_factor=1.5):
         Rot, v, p, b_omega, b_acc, Rot_c_i, t_c_i, measurements_covs = dataset.get_estimates(
             dataset_name)
         t, ang_gt, p_gt, v_gt, u = dataset.get_data(dataset_name)
-        t = (t - t[0]).numpy()
-        p_gt = (p_gt - p_gt[0]).numpy()
-        v_gt = v_gt.numpy()
-        u = u.numpy()
+        t = (t - t[0]).cpu().numpy()
+        p_gt = (p_gt - p_gt[0]).cpu().numpy()
+        v_gt = v_gt.cpu().numpy()
+        u = u.cpu().numpy()
 
         speed_gt = np.linalg.norm(v_gt, axis=1)
         speed_est = np.linalg.norm(v, axis=1)
@@ -335,7 +336,8 @@ def plot_stationary_periods(args, dataset, speed_thresh=0.5, speed_factor=1.5):
                         label='KF while GPS-stationary', zorder=3)
         ax2.axis('equal')
         ax2.set(xlabel=r'$p^x$ (m)', ylabel=r'$p^y$ (m)',
-                title='Trajectory until divergence (t = {:.0f} s); stationary marked'.format(t[n - 1]))
+                title='Trajectory until divergence (t = {:.0f} s); stationary marked'.format(
+                    t[max(n - 1, 0)]))
         ax2.legend(loc='best')
         ax2.grid()
         fig2.tight_layout()
