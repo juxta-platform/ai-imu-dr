@@ -100,7 +100,7 @@ def _estimate_mount(ang_gt, v_gt, min_speed=3.0):
     return Rot_c_p
 
 
-def csv_to_mondict(csv_path, name):
+def csv_to_mondict(csv_path, name, estimate_mount=True, mount_rpy_deg=None):
     """Convert one DeviceMotion CSV into the pickle dict used by BaseDataset."""
     cprint('Reading {}'.format(csv_path), 'cyan')
     d = _read_csv_columns(csv_path)
@@ -184,11 +184,21 @@ def csv_to_mondict(csv_path, name):
     # Phones were mounted in different poses; KITTI nets/filter assume a car-aligned IMU,
     # so express u and attitude in the estimated car frame (Rot_c_i only refines small residuals).
     # game_rv supplies roll/pitch vs world-vertical; GPS velocity supplies car yaw.
-    Rot_c_p = _estimate_mount(ang_gt, v_gt)
-    u = np.concatenate([u[:, :3].dot(Rot_c_p.T), u[:, 3:].dot(Rot_c_p.T)], axis=1)
-    ang_gt = np.array([NUMPYIEKF.to_rpy(NUMPYIEKF.from_rpy(*a).dot(Rot_c_p.T)) for a in ang_gt])
-    cprint('  phone->car mount rpy (deg): {}'.format(
-        np.rad2deg(NUMPYIEKF.to_rpy(Rot_c_p)).round(1)), 'green')
+    if mount_rpy_deg is not None:
+        r, p, y = np.deg2rad(mount_rpy_deg)
+        Rot_c_p = NUMPYIEKF.from_rpy(r, p, y)
+        u = np.concatenate([u[:, :3].dot(Rot_c_p.T), u[:, 3:].dot(Rot_c_p.T)], axis=1)
+        ang_gt = np.array([NUMPYIEKF.to_rpy(NUMPYIEKF.from_rpy(*a).dot(Rot_c_p.T)) for a in ang_gt])
+        cprint('  phone->car fixed mount rpy (deg): {}'.format(
+            np.array(mount_rpy_deg).round(1)), 'green')
+    elif estimate_mount:
+        Rot_c_p = _estimate_mount(ang_gt, v_gt)
+        u = np.concatenate([u[:, :3].dot(Rot_c_p.T), u[:, 3:].dot(Rot_c_p.T)], axis=1)
+        ang_gt = np.array([NUMPYIEKF.to_rpy(NUMPYIEKF.from_rpy(*a).dot(Rot_c_p.T)) for a in ang_gt])
+        cprint('  phone->car mount rpy (deg): {}'.format(
+            np.rad2deg(NUMPYIEKF.to_rpy(Rot_c_p)).round(1)), 'green')
+    else:
+        cprint('  phone->car mount estimation off', 'yellow')
 
     # Phone being placed in / removed from the mount at the ends breaks the fixed mount
     # (and the filter inits attitude from ang_gt[0]); drop those segments.
@@ -228,6 +238,8 @@ def csv_to_mondict(csv_path, name):
         'u': torch.from_numpy(u).float(),
         'name': name,
         't0': float(t0),
+        'estimate_mount': bool(estimate_mount) and mount_rpy_deg is None,
+        'mount_rpy_deg': list(mount_rpy_deg) if mount_rpy_deg is not None else None,
     }
 
 
@@ -237,6 +249,9 @@ class PhoneDataset(BaseDataset):
     odometry_benchmark = OrderedDict()
 
     def __init__(self, args):
+        csv_path = getattr(args, 'csv_path', None)
+        self.only_sequence = (
+            os.path.splitext(os.path.basename(csv_path))[0] if csv_path else None)
         super(PhoneDataset, self).__init__(args)
         # Evaluate every converted sequence end-to-end
         self.odometry_benchmark = OrderedDict(
@@ -248,23 +263,36 @@ class PhoneDataset(BaseDataset):
         if not os.path.isdir(self.path_data_save):
             return
         for f in sorted(os.listdir(self.path_data_save)):
-            if f.endswith(self.pickle_extension):
-                self.datasets.append(f[:-len(self.pickle_extension)])
+            if not f.endswith(self.pickle_extension):
+                continue
+            name = f[:-len(self.pickle_extension)]
+            if self.only_sequence is not None and name != self.only_sequence:
+                continue
+            self.datasets.append(name)
         self.divide_datasets()
 
     @staticmethod
     def read_data(args):
-        csv_dir = args.path_data_csv
         out_dir = args.path_data_save
         os.makedirs(out_dir, exist_ok=True)
-        csv_files = sorted(
-            f for f in os.listdir(csv_dir) if f.endswith('.csv')
-        )
-        if not csv_files:
-            raise FileNotFoundError('No CSV files in {}'.format(csv_dir))
-        for csv_name in csv_files:
-            seq_name = os.path.splitext(csv_name)[0]
-            mondict = csv_to_mondict(os.path.join(csv_dir, csv_name), seq_name)
+        csv_path = getattr(args, 'csv_path', None)
+        if csv_path:
+            csv_paths = [csv_path]
+        else:
+            csv_dir = args.path_data_csv
+            csv_paths = [
+                os.path.join(csv_dir, f)
+                for f in sorted(os.listdir(csv_dir))
+                if f.endswith('.csv')
+            ]
+        if not csv_paths:
+            raise FileNotFoundError('No CSV files in {}'.format(args.path_data_csv))
+        for csv_path in csv_paths:
+            seq_name = os.path.splitext(os.path.basename(csv_path))[0]
+            mondict = csv_to_mondict(
+                csv_path, seq_name,
+                estimate_mount=getattr(args, 'estimate_mount', True),
+                mount_rpy_deg=getattr(args, 'mount_rpy_deg', None))
             PhoneDataset.dump(mondict, out_dir, seq_name)
             cprint('  wrote {}{}.p'.format(out_dir + os.sep, seq_name), 'green')
-        cprint('Done converting {} sequences'.format(len(csv_files)), 'green')
+        cprint('Done converting {} sequences'.format(len(csv_paths)), 'green')
