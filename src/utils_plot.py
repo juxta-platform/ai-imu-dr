@@ -42,16 +42,15 @@ def results_filter(args, dataset):
         for j in range(Rot.shape[0]):
             roll, pitch, yaw = TORCHIEKF.to_rpy(torch.from_numpy(Rot[j]))
             ang[j, 0] = roll.numpy()
-            ang[j, 0] = pitch.numpy()
-            ang[j, 0] = yaw.numpy()
-        # unwrap
+            ang[j, 1] = pitch.numpy()
+            ang[j, 2] = yaw.numpy()
             Rot_gt[j] = TORCHIEKF.from_rpy(torch.Tensor([ang_gt[j, 0]]),
                                         torch.Tensor([ang_gt[j, 1]]),
                                         torch.Tensor([ang_gt[j, 2]]))
             roll, pitch, yaw = TORCHIEKF.to_rpy(Rot_gt[j])
             ang_gt[j, 0] = roll.numpy()
-            ang_gt[j, 0] = pitch.numpy()
-            ang_gt[j, 0] = yaw.numpy()
+            ang_gt[j, 1] = pitch.numpy()
+            ang_gt[j, 2] = yaw.numpy()
 
         Rot_align, t_align, _ = umeyama_alignment(p_gt[:, :3].T, p[:, :3].T)
         p_align = (Rot_align.T.dot(p[:, :3].T)).T - Rot_align.T.dot(t_align)
@@ -178,10 +177,8 @@ def results_filter(args, dataset):
             ['$v_n^x$', '$v_n^y$', '$v_n^z$', '$\hat{v}_n^x$', '$\hat{v}_n^y$', '$\hat{v}_n^z$'])
         axs2[0].legend([r'$\phi_n^x$', r'$\theta_n^y$', r'$\psi_n^z$', r'$\hat{\phi}_n^x$',
                         r'$\hat{\theta}_n^y$', r'$\hat{\psi}_n^z$'])
-        axs2[1].legend(
-            ['$b_n^x$', '$b_n^y$', '$b_n^z$', '$\hat{b}_n^x$', '$\hat{b}_n^y$', '$\hat{b}_n^z$'])
-        axs2[2].legend(
-            ['$b_n^x$', '$b_n^y$', '$b_n^z$', '$\hat{b}_n^x$', '$\hat{b}_n^y$', '$\hat{b}_n^z$'])
+        axs2[1].legend(['$b_n^x$', '$b_n^y$', '$b_n^z$'])
+        axs2[2].legend(['$b_n^x$', '$b_n^y$', '$b_n^z$'])
         ax3.legend(['ground-truth trajectory', 'proposed'])
         ax4.legend(['ground-truth trajectory', 'proposed'])
         axs5[0].legend(['zero lateral velocity', 'zero vertical velocity'])
@@ -258,11 +255,57 @@ def _stationary_segments(t, stationary):
 
 
 def _shade_stationary(ax, segments, label_once=True):
+    """GPS stops as a bar along the top of the axes, not a full-height span."""
     labeled = False
     for t0, t1 in segments:
-        ax.axvspan(t0, t1, color='0.85', zorder=0,
+        ax.axvspan(t0, t1, ymin=0.92, ymax=1.0, color='0.55', zorder=0, linewidth=0,
                    label='stationary (GPS)' if label_once and not labeled else None)
         labeled = True
+
+
+def _mark_zupt(ax, t, zupt, label_once=True):
+    """ZUPT stops as a purple bar just under the GPS bar."""
+    if zupt is None or not np.any(zupt):
+        return
+    labeled = False
+    for t0, t1 in _stationary_segments(t, zupt):
+        ax.axvspan(t0, t1, ymin=0.84, ymax=0.92, color='#7E57C2', zorder=0, linewidth=0,
+                   label='stationary (ZUPT)' if label_once and not labeled else None)
+        labeled = True
+
+
+def _zupt_mask(dataset, dataset_name, n):
+    """IMU zero-velocity flags saved with the filter result. None if this run had no ZUPT."""
+    file_name = os.path.join(dataset.path_results, dataset_name + "_filter.p")
+    zupt = dataset.load(file_name).get('zupt')
+    if zupt is None:
+        return None
+    zupt = np.asarray(zupt, dtype=bool)
+    if len(zupt) == n:
+        return zupt
+    out = np.zeros(n, dtype=bool)
+    m = min(len(zupt), n)
+    out[:m] = zupt[:m]
+    return out
+
+
+def _mark_both_paths(ax, p_gt, p, i0, i1, **kwargs):
+    """One stop marker on the GPS path and the same instant on the KF path."""
+    ax.scatter(p_gt[i0:i1 + 1, 0].mean(), p_gt[i0:i1 + 1, 1].mean(), **kwargs)
+    kwargs = dict(kwargs)
+    kwargs['label'] = None
+    ax.scatter(p[i0:i1 + 1, 0].mean(), p[i0:i1 + 1, 1].mean(), **kwargs)
+
+
+def _mask_spans(mask):
+    """Index pairs (start, end) of contiguous True runs. end is inclusive."""
+    if len(mask) == 0 or not np.any(mask):
+        return []
+    padded = np.concatenate([[False], mask, [False]])
+    edges = np.diff(padded.astype(np.int8))
+    starts = np.where(edges == 1)[0]
+    ends = np.where(edges == -1)[0] - 1
+    return list(zip(starts, ends))
 
 
 def plot_stationary_periods(args, dataset, speed_thresh=0.5, speed_factor=1.5):
@@ -283,22 +326,25 @@ def plot_stationary_periods(args, dataset, speed_thresh=0.5, speed_factor=1.5):
         speed_gt = np.linalg.norm(v_gt, axis=1)
         speed_est = np.linalg.norm(v, axis=1)
         stationary = speed_gt < speed_thresh
+        zupt = _zupt_mask(dataset, dataset_name, len(t))
         segments = _stationary_segments(t, stationary)
         diverged = np.where(speed_est > speed_factor * max(speed_gt.max(), 1e-6))[0]
         n_div = int(diverged[0]) if len(diverged) else len(t)
 
         fig, axs = plt.subplots(4, 1, sharex=True, figsize=(20, 14))
         _shade_stationary(axs[0], segments)
+        _mark_zupt(axs[0], t, zupt)
         axs[0].plot(t, speed_gt, label='GPS speed (GT)')
         axs[0].plot(t, speed_est, label='KF speed')
         axs[0].axhline(speed_thresh, color='k', linestyle='--', linewidth=0.8,
-                        label='stationary thresh ({:.1f} m/s)'.format(speed_thresh))
+                       label='stationary thresh ({:.1f} m/s)'.format(speed_thresh))
         if n_div < len(t):
             axs[0].axvline(t[n_div], color='r', linestyle=':', linewidth=1.0, label='KF divergence')
         axs[0].set(ylabel='speed (m/s)', title='{}: speed and stationary periods'.format(dataset_name))
         axs[0].legend(loc='upper right')
 
         _shade_stationary(axs[1], segments, label_once=False)
+        _mark_zupt(axs[1], t, zupt, label_once=False)
         axs[1].plot(t, u[:, 0], label=r'$\omega_x$')
         axs[1].plot(t, u[:, 1], label=r'$\omega_y$')
         axs[1].plot(t, u[:, 2], label=r'$\omega_z$')
@@ -306,6 +352,7 @@ def plot_stationary_periods(args, dataset, speed_thresh=0.5, speed_factor=1.5):
         axs[1].legend(loc='upper right')
 
         _shade_stationary(axs[2], segments, label_once=False)
+        _mark_zupt(axs[2], t, zupt, label_once=False)
         axs[2].plot(t, u[:, 3], label=r'$a_x$')
         axs[2].plot(t, u[:, 4], label=r'$a_y$')
         axs[2].plot(t, u[:, 5], label=r'$a_z$')
@@ -313,6 +360,7 @@ def plot_stationary_periods(args, dataset, speed_thresh=0.5, speed_factor=1.5):
         axs[2].legend(loc='upper right')
 
         _shade_stationary(axs[3], segments, label_once=False)
+        _mark_zupt(axs[3], t, zupt, label_once=False)
         axs[3].plot(t, v_gt[:, 0], label=r'GPS $v_e$')
         axs[3].plot(t, v_gt[:, 1], label=r'GPS $v_n$')
         axs[3].plot(t, v[:, 0], label=r'KF $\hat{v}_e$')
@@ -323,17 +371,28 @@ def plot_stationary_periods(args, dataset, speed_thresh=0.5, speed_factor=1.5):
             ax.grid()
         fig.tight_layout()
 
-        # Trajectory with stationary samples highlighted (clipped before divergence)
+        # Lines stay blue and orange. Each stop is marked on both paths.
         fig2, ax2 = plt.subplots(figsize=(12, 10))
         n = n_div
-        ax2.plot(p_gt[:n, 0], p_gt[:n, 1], label='GPS / GT trajectory')
-        ax2.plot(p[:n, 0], p[:n, 1], label='KF trajectory')
-        st = stationary[:n]
-        if np.any(st):
-            ax2.scatter(p_gt[:n][st, 0], p_gt[:n][st, 1], s=4, c='0.5',
-                        label='GT while GPS-stationary', zorder=3)
-            ax2.scatter(p[:n][st, 0], p[:n][st, 1], s=4, c='C3',
-                        label='KF while GPS-stationary', zorder=3)
+        ax2.plot(p_gt[:n, 0], p_gt[:n, 1], color='C0', label='GPS / GT trajectory')
+        ax2.plot(p[:n, 0], p[:n, 1], color='C1', label='KF trajectory')
+        saw_gps = False
+        for s, e in _mask_spans(stationary[:n]):
+            if t[min(e, n - 1)] - t[s] < 1.0:
+                continue
+            _mark_both_paths(ax2, p_gt[:n], p[:n], s, e,
+                             s=160, c='0.35', alpha=0.35, zorder=4,
+                             label='stationary (GPS)' if not saw_gps else None)
+            saw_gps = True
+        saw_zupt = False
+        if zupt is not None:
+            for s, e in _mask_spans(zupt[:n]):
+                if t[min(e, n - 1)] - t[s] < 1.0:
+                    continue
+                _mark_both_paths(ax2, p_gt[:n], p[:n], s, e,
+                                 s=36, c='#7E57C2', zorder=5,
+                                 label='stationary (ZUPT)' if not saw_zupt else None)
+                saw_zupt = True
         ax2.axis('equal')
         ax2.set(xlabel=r'$p^x$ (m)', ylabel=r'$p^y$ (m)',
                 title='Trajectory until divergence (t = {:.0f} s); stationary marked'.format(

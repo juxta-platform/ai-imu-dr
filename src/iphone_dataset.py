@@ -100,7 +100,7 @@ def _estimate_mount(ang_gt, v_gt, min_speed=3.0):
     return Rot_c_p
 
 
-def csv_to_mondict(csv_path, name, estimate_mount=True, mount_rpy_deg=None):
+def csv_to_mondict(csv_path, name, estimate_mount=False, mount_rpy_deg=None):
     """Convert one DeviceMotion CSV into the pickle dict used by BaseDataset."""
     cprint('Reading {}'.format(csv_path), 'cyan')
     d = _read_csv_columns(csv_path)
@@ -208,6 +208,7 @@ def csv_to_mondict(csv_path, name, estimate_mount=True, mount_rpy_deg=None):
     tail = np.where(handling & (t > t[-1] - HANDLING_WINDOW_S))[0]
     i_end = int(tail[0]) if len(tail) else len(t)
     i0 = max(i0, int(head[-1]) + 1 if len(head) else 0)
+    lla0 = [float(lat_f[i0]), float(lon_f[i0]), float(alt_f[i0])]
     if i_end - i0 < 2:
         raise RuntimeError(
             'Trimming leaves fewer than two usable samples in {}'.format(csv_path))
@@ -238,6 +239,7 @@ def csv_to_mondict(csv_path, name, estimate_mount=True, mount_rpy_deg=None):
         'u': torch.from_numpy(u).float(),
         'name': name,
         't0': float(t0),
+        'lla0': lla0,
         'estimate_mount': bool(estimate_mount) and mount_rpy_deg is None,
         'mount_rpy_deg': list(mount_rpy_deg) if mount_rpy_deg is not None else None,
     }
@@ -291,7 +293,7 @@ class PhoneDataset(BaseDataset):
             seq_name = os.path.splitext(os.path.basename(csv_path))[0]
             mondict = csv_to_mondict(
                 csv_path, seq_name,
-                estimate_mount=getattr(args, 'estimate_mount', True),
+                estimate_mount=getattr(args, 'estimate_mount', False),
                 mount_rpy_deg=getattr(args, 'mount_rpy_deg', None))
             PhoneDataset.dump(mondict, out_dir, seq_name)
             cprint('  wrote {}{}.p'.format(out_dir + os.sep, seq_name), 'green')

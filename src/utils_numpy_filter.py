@@ -44,6 +44,14 @@ class NUMPYIEKF:
             filter_parameters = parameter_class()
         self.filter_parameters = filter_parameters
         self.set_param_attr()
+        # IMU-only zero-velocity update. Off unless a caller enables it, so KITTI runs stay unchanged.
+        self.zupt = False
+        self.zupt_window_s = 1.0
+        self.zupt_gyro_thresh = 0.02  # rad/s, mean gyro norm over the window
+        self.zupt_acc_std_thresh = 0.10  # m/s^2, max per-axis accel std over the window
+        self.zupt_gravity_tol = 0.5  # m/s^2, |mean specific-force| vs gravity
+        self.zupt_cov = 1e-2  # (m/s)^2
+        self.zupt_mask = None
 
     class Parameters:
         g = np.array([0, 0, -9.80665])
@@ -115,10 +123,48 @@ class NUMPYIEKF:
                            self.cov_Rot_c_i, self.cov_Rot_c_i, self.cov_Rot_c_i,
                            self.cov_t_c_i, self.cov_t_c_i, self.cov_t_c_i])
 
+    def detect_zupt(self, t, u):
+        """Samples whose recent IMU window is still: low gyro, low accel variance, specific force near gravity.
+
+        Uses only u. GPS speed is not an input.
+        """
+        n = u.shape[0]
+        still = np.zeros(n, dtype=bool)
+        if n < 3:
+            return still
+        dt = np.median(np.diff(t))
+        if not np.isfinite(dt) or dt <= 0:
+            dt = 0.01
+        w = int(round(self.zupt_window_s / dt))
+        w = min(max(w, 1), n)
+
+        def roll_mean(x):
+            c = np.cumsum(np.concatenate([[0.0], np.asarray(x, dtype=float)]))
+            out = (c[w:] - c[:-w]) / w
+            return np.pad(out, (w - 1, 0), mode="edge")
+
+        gyro = np.linalg.norm(u[:, :3], axis=1)
+        acc = u[:, 3:6]
+        gmean = roll_mean(gyro)
+        astd = np.zeros(n)
+        for k in range(3):
+            mean_k = roll_mean(acc[:, k])
+            mean_sq = roll_mean(acc[:, k] ** 2)
+            astd = np.maximum(astd, np.sqrt(np.maximum(mean_sq - mean_k ** 2, 0.0)))
+        g = np.linalg.norm(self.g) if self.g is not None else 9.80655
+        gdev = np.abs(roll_mean(np.linalg.norm(acc, axis=1)) - g)
+        still = (gmean < self.zupt_gyro_thresh) & (astd < self.zupt_acc_std_thresh) & (
+            gdev < self.zupt_gravity_tol)
+        return still
+
     def run(self, t, u, measurements_covs, v_mes, p_mes, N, ang0):
         dt = t[1:] - t[:-1]  # (s)
         if N is None:
             N = u.shape[0]
+        self.zupt_mask = None
+        if self.zupt:
+            self.zupt_mask = self.detect_zupt(t, u)
+            print("ZUPT on {:.1f}% of samples".format(100.0 * np.mean(self.zupt_mask)))
         Rot, v, p, b_omega, b_acc, Rot_c_i, t_c_i, P = self.init_run(dt, u, p_mes, v_mes,
                                        ang0, N)
 
@@ -127,9 +173,10 @@ class NUMPYIEKF:
                 self.propagate(Rot[i-1], v[i-1], p[i-1], b_omega[i-1], b_acc[i-1], Rot_c_i[i-1],
                                t_c_i[i-1], P, u[i], dt[i-1])
 
+            zupt_i = self.zupt_mask is not None and bool(self.zupt_mask[i])
             Rot[i], v[i], p[i], b_omega[i], b_acc[i], Rot_c_i[i], t_c_i[i], P = \
                 self.update(Rot[i], v[i], p[i], b_omega[i], b_acc[i], Rot_c_i[i], t_c_i[i], P, u[i],
-                            i, measurements_covs[i])
+                            i, measurements_covs[i], zupt_i)
             # correct numerical error every second
             if i % self.n_normalize_rot == 0:
                 Rot[i] = self.normalize_rot(Rot[i])
@@ -210,7 +257,7 @@ class NUMPYIEKF:
         P = Phi.dot(P_prev + G.dot(self.Q).dot(G.T)).dot(Phi.T)
         return P
 
-    def update(self, Rot, v, p, b_omega, b_acc, Rot_c_i, t_c_i, P, u, i, measurement_cov):
+    def update(self, Rot, v, p, b_omega, b_acc, Rot_c_i, t_c_i, P, u, i, measurement_cov, zupt=False):
         # orientation of body frame
         Rot_body = Rot.dot(Rot_c_i)
         # velocity in imu frame
@@ -225,13 +272,23 @@ class NUMPYIEKF:
         H_v_imu = Rot_c_i.T.dot(self.skew(v_imu))
         H_t_c_i = -self.skew(t_c_i)
 
-        H = np.zeros((2, self.P_dim))
-        H[:, 3:6] = Rot_body.T[1:]
-        H[:, 15:18] = H_v_imu[1:]
-        H[:, 9:12] = H_t_c_i[1:]
-        H[:, 18:21] = -Omega[1:]
-        r = - v_body[1:]
-        R = np.diag(measurement_cov)
+        if zupt:
+            # Full velocity is zero. Replaces the lateral/vertical constraint for this sample.
+            H = np.zeros((3, self.P_dim))
+            H[:, 3:6] = Rot_body.T
+            H[:, 15:18] = H_v_imu
+            H[:, 9:12] = H_t_c_i
+            H[:, 18:21] = -Omega
+            r = -v_body
+            R = self.zupt_cov * self.Id3
+        else:
+            H = np.zeros((2, self.P_dim))
+            H[:, 3:6] = Rot_body.T[1:]
+            H[:, 15:18] = H_v_imu[1:]
+            H[:, 9:12] = H_t_c_i[1:]
+            H[:, 18:21] = -Omega[1:]
+            r = - v_body[1:]
+            R = np.diag(measurement_cov)
         Rot_up, v_up, p_up, b_omega_up, b_acc_up, Rot_c_i_up, t_c_i_up, P_up = \
             self.state_and_cov_update(Rot, v, p, b_omega, b_acc, Rot_c_i, t_c_i, P, H, r, R)
         return Rot_up, v_up, p_up, b_omega_up, b_acc_up, Rot_c_i_up, t_c_i_up, P_up

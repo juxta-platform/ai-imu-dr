@@ -3,7 +3,7 @@
 Uses KITTI-trained nets + KITTIParameters unchanged (baseline, no retuning).
 
     python main_iphone.py path/to/recording.csv
-    python main_iphone.py --no-estimate-mount path/to/recording.csv
+    python main_iphone.py --estimate-mount path/to/recording.csv
     python main_iphone.py --mount-rpy 180 0 -146 path/to/recording.csv
 """
 import argparse
@@ -19,8 +19,8 @@ from utils_plot import plot_before_divergence, plot_stationary_periods
 class PhoneArgs():
     _repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
     path_data_csv = os.path.join(_repo_root, 'data', 'our_data')
-    path_data_save = os.path.join(_repo_root, 'data', 'iphone_rot')
-    path_results = os.path.join(_repo_root, 'results', 'iphone_rot')
+    path_data_save = os.path.join(_repo_root, 'data', 'iphone_zupt_raw')
+    path_results = os.path.join(_repo_root, 'results', 'iphone_zupt_raw')
     path_temp = os.path.join(_repo_root, 'temp')  # KITTI iekfnets + normalize_factors
 
     epochs = 400
@@ -38,8 +38,9 @@ class PhoneArgs():
     dataset_class = PhoneDataset
     parameter_class = KITTIParameters
     csv_path = None
-    estimate_mount = True  # phone->car rotation from attitude + GPS velocity
+    estimate_mount = False  # set True with --estimate-mount
     mount_rpy_deg = None   # fixed phone->car rotation as [roll, pitch, yaw] in degrees
+    zupt = True  # IMU-only zero-velocity update while the phone is still
 
 
 def parse_cli():
@@ -49,12 +50,12 @@ def parse_cli():
         'csv', nargs='?', default=None,
         help='Path to one CSV. Omit to convert every CSV in data/our_data.')
     parser.add_argument(
-        '--no-estimate-mount', dest='estimate_mount', action='store_false',
-        help='Leave IMU and attitude in the phone frame. By default they are rotated into the car frame.')
+        '--estimate-mount', dest='estimate_mount', action='store_true',
+        help='Rotate IMU and attitude into the car frame using attitude and GPS heading.')
     parser.add_argument(
         '--mount-rpy', nargs=3, type=float, metavar=('ROLL', 'PITCH', 'YAW'),
-        help='Fixed phone->car rotation as roll pitch yaw in degrees. Overrides --estimate-mount.')
-    parser.set_defaults(estimate_mount=True)
+        help='Rotate IMU and attitude by this fixed phone->car roll pitch yaw, in degrees.')
+    parser.set_defaults(estimate_mount=False)
     return parser.parse_args()
 
 

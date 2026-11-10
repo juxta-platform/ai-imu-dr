@@ -427,6 +427,7 @@ def test_filter(args, dataset):
 
     torch_iekf.load(args, dataset)
     iekf.set_learned_covariance(torch_iekf)
+    iekf.zupt = getattr(args, "zupt", False)
 
     for i in range(0, len(dataset.datasets)):
         dataset_name = dataset.dataset_name(i)
@@ -451,6 +452,8 @@ def test_filter(args, dataset):
             'Rot_c_i': Rot_c_i, 't_c_i': t_c_i,
             'measurements_covs': measurements_covs,
             }
+        if iekf.zupt_mask is not None:
+            mondict['zupt'] = iekf.zupt_mask
         dataset.dump(mondict, args.path_results, dataset_name + "_filter.p")
 
 
